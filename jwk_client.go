@@ -2,18 +2,17 @@ package auth0
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
 
-	"github.com/go-errors/errors"
 	"gopkg.in/square/go-jose.v2"
 )
 
 var (
-	ErrInvalidContentType = errors.New("Should have a JSON content type for JWKS endpoint.")
-	ErrNoKeyFound         = errors.New("No Keys has been found")
-	ErrInvalidAlgorithm   = errors.New("Algorithm is invalid")
+	ErrInvalidContentType = errors.New("should have a JSON content type for JWKS endpoint")
+	ErrInvalidAlgorithm   = errors.New("algorithm is invalid")
 )
 
 type JWKClientOptions struct {
@@ -33,30 +32,25 @@ type JWKClient struct {
 
 // NewJWKClient creates a new JWKClient instance from the
 // provided options.
+// This instance will cache all downloaded keys and
+// cached keys will never be timeout
 func NewJWKClient(options JWKClientOptions, extractor RequestTokenExtractor) *JWKClient {
-	if extractor == nil {
-		extractor = RequestTokenExtractorFunc(FromHeader)
-	}
-
-	kc := newMemoryPersistentKeyCacher()
-
-	return &JWKClient{
-		keyCacher: kc,
-		options:   options,
-		extractor: extractor,
-	}
+	return NewJWKClientWithCache(options, extractor, nil)
 }
 
-func NewJWKClientWithCustomCacher(options JWKClientOptions, extractor RequestTokenExtractor, kc KeyCacher) *JWKClient {
+// NewJWKClientWithCache creates a new JWKClient instance from the
+// provided options and a custom keycacher interface.
+// Passing nil to keyCacher will create a persistent key cacher
+func NewJWKClientWithCache(options JWKClientOptions, extractor RequestTokenExtractor, keyCacher KeyCacher) *JWKClient {
 	if extractor == nil {
 		extractor = RequestTokenExtractorFunc(FromHeader)
 	}
-	if kc == nil {
-		kc = newMemoryPersistentKeyCacher()
+	if keyCacher == nil {
+		keyCacher = newMemoryPersistentKeyCacher()
 	}
 
 	return &JWKClient{
-		keyCacher: kc,
+		keyCacher: keyCacher,
 		options:   options,
 		extractor: extractor,
 	}
@@ -67,20 +61,20 @@ func (j *JWKClient) GetKey(ID string) (jose.JSONWebKey, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
-	searchedKey, exist := j.keyCacher.Get(ID)
-
-	if !exist {
-		if keys, err := j.downloadKeys(); err != nil {
+	searchedKey, err := j.keyCacher.Get(ID)
+	if err != nil {
+		keys, err := j.downloadKeys()
+		if err != nil {
 			return jose.JSONWebKey{}, err
-		} else {
-			addedKey, success := j.keyCacher.Add(ID, keys)
-			if success {
-				return addedKey, nil
-			}
-			return jose.JSONWebKey{}, ErrNoKeyFound
 		}
+		addedKey, err := j.keyCacher.Add(ID, keys)
+		if err != nil {
+			return jose.JSONWebKey{}, err
+		}
+		return *addedKey, nil
 	}
-	return searchedKey, nil
+
+	return *searchedKey, nil
 }
 
 func (j *JWKClient) downloadKeys() ([]jose.JSONWebKey, error) {
